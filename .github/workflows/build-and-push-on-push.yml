@@ -19,7 +19,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/reth
 
 jobs:
   build-and-push:
@@ -30,6 +29,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # GHCR rejects mixed-case image names; normalize the repo owner to
+      # lowercase so the tags are always valid regardless of how the fork
+      # owner spells their handle.
+      - name: Compute lowercased image name
+        id: image
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}/reth" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -47,9 +53,13 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          # Build with --profile release so the linker peak fits in GHA's
+          # ~7 GB runner RAM. maxperf (default) needs more.
+          build-args: |
+            BUILD_PROFILE=release
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:skip-genesis-validation
+            ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:skip-genesis-validation
           cache-from: type=gha
           cache-to: type=gha,mode=max
           # state-actor pulls amd64 in Docker Desktop linux/amd64 emulation;
