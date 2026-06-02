@@ -17,7 +17,7 @@
 //!   --research.eip8037 \
 //!   --research.csv 7904-prelim=./schedules/7904_prelim.csv \
 //!   --research.gas-limit-multiplier 8 \
-//!   --research.db-path ./divergences.db
+//!   --research.db-path ./divergences.sqlite
 //! ```
 
 use alloy_consensus::{constants::KECCAK_EMPTY, transaction::TxHashRef, BlockHeader, Transaction};
@@ -67,7 +67,9 @@ use tokio::{sync::mpsc, task::JoinHandle as TokioJoinHandle};
 /// as a single DuckDB transaction. `DeleteRange` clears all per-block
 /// tables in a contiguous block range — used on chain reorg / revert.
 enum DbCommand {
-    BlockProcessed(BlockOutput),
+    // Boxed: `BlockOutput` is a large per-block payload (~224 B inline vs 16 B
+    // for `DeleteRange`); boxing keeps queued channel messages pointer-sized.
+    BlockProcessed(Box<BlockOutput>),
     DeleteRange { from_block: u64, to_block: u64 },
 }
 
@@ -133,9 +135,9 @@ fn derive_parent_call_indices(frames: &[reth_research::divergence::CallFrame]) -
         if d == 0 {
             continue;
         }
-        for j in (i + 1)..frames.len() {
-            if frames[j].depth == d - 1 {
-                parents[i] = Some(frames[j].call_index as u32);
+        for frame in frames.iter().skip(i + 1) {
+            if frame.depth == d - 1 {
+                parents[i] = Some(frame.call_index as u32);
                 break;
             }
         }
@@ -396,7 +398,7 @@ where
 
             // Log configured schedules
             for name in registry.names() {
-                if let Some(schedule) = registry.get(&name) {
+                if let Some(schedule) = registry.get(name) {
                     info!(
                         target: "exex::research",
                         schedule = name,
@@ -433,7 +435,7 @@ where
                                     continue;
                                 }
                                 blocks_written += 1;
-                                if blocks_written % 100 == 0 {
+                                if blocks_written.is_multiple_of(100) {
                                     debug!(
                                         target: "exex::research::db_writer",
                                         blocks_written,
@@ -535,17 +537,17 @@ where
         // a tokio task wakes every N seconds and runs the SQL-prefiltered
         // incremental backfill so `contract_metadata` fills as new
         // addresses appear. Requires a real DB; in-memory mode skips it.
-        if metadata_backfill_interval_secs > 0 {
-            if let Some(db) = divergence_db.clone() {
-                let provider = ctx.components.provider().clone();
-                let interval = std::time::Duration::from_secs(metadata_backfill_interval_secs);
-                tokio::spawn(periodic_metadata_backfill(db, provider, interval));
-                info!(
-                    target: "exex::research",
-                    interval_secs = metadata_backfill_interval_secs,
-                    "Periodic contract-metadata backfill enabled"
-                );
-            }
+        if metadata_backfill_interval_secs > 0 &&
+            let Some(db) = divergence_db.clone()
+        {
+            let provider = ctx.components.provider().clone();
+            let interval = std::time::Duration::from_secs(metadata_backfill_interval_secs);
+            tokio::spawn(periodic_metadata_backfill(db, provider, interval));
+            info!(
+                target: "exex::research",
+                interval_secs = metadata_backfill_interval_secs,
+                "Periodic contract-metadata backfill enabled"
+            );
         }
 
         // Load the external-label config once. Missing path / file is
@@ -560,37 +562,37 @@ where
         // Periodic external contract-label backfill (Blockscout → Sourcify
         // → Etherscan). Network-bound, so runs entirely in the async
         // runtime with no spawn_blocking.
-        if contract_labels_interval_secs > 0 {
-            if let Some(db) = divergence_db.clone() {
-                let fetcher = std::sync::Arc::new(
-                    reth_research::external_labels::ContractLabelFetcher::new(&label_config),
-                );
-                let interval = std::time::Duration::from_secs(contract_labels_interval_secs);
-                tokio::spawn(periodic_contract_label_backfill(db, fetcher, interval));
-                info!(
-                    target: "exex::research",
-                    interval_secs = contract_labels_interval_secs,
-                    etherscan_enabled = label_config.etherscan_api_key.is_some(),
-                    "Periodic contract-label backfill enabled"
-                );
-            }
+        if contract_labels_interval_secs > 0 &&
+            let Some(db) = divergence_db.clone()
+        {
+            let fetcher = std::sync::Arc::new(
+                reth_research::external_labels::ContractLabelFetcher::new(&label_config),
+            );
+            let interval = std::time::Duration::from_secs(contract_labels_interval_secs);
+            tokio::spawn(periodic_contract_label_backfill(db, fetcher, interval));
+            info!(
+                target: "exex::research",
+                interval_secs = contract_labels_interval_secs,
+                etherscan_enabled = label_config.etherscan_api_key.is_some(),
+                "Periodic contract-label backfill enabled"
+            );
         }
 
         // Periodic function-signature backfill (OpenChain).
-        if function_signatures_interval_secs > 0 {
-            if let Some(db) = divergence_db.clone() {
-                let fetcher =
-                    std::sync::Arc::new(reth_research::external_labels::OpenChainFetcher::new(
-                        label_config.openchain_base_url.as_deref(),
-                    ));
-                let interval = std::time::Duration::from_secs(function_signatures_interval_secs);
-                tokio::spawn(periodic_function_signature_backfill(db, fetcher, interval));
-                info!(
-                    target: "exex::research",
-                    interval_secs = function_signatures_interval_secs,
-                    "Periodic function-signature backfill enabled"
-                );
-            }
+        if function_signatures_interval_secs > 0 &&
+            let Some(db) = divergence_db.clone()
+        {
+            let fetcher =
+                std::sync::Arc::new(reth_research::external_labels::OpenChainFetcher::new(
+                    label_config.openchain_base_url.as_deref(),
+                ));
+            let interval = std::time::Duration::from_secs(function_signatures_interval_secs);
+            tokio::spawn(periodic_function_signature_backfill(db, fetcher, interval));
+            info!(
+                target: "exex::research",
+                interval_secs = function_signatures_interval_secs,
+                "Periodic function-signature backfill enabled"
+            );
         }
 
         Ok(Self {
@@ -710,10 +712,10 @@ where
             self.handle_backfill_completion(result);
         }
         drop(self.analyzer);
-        if let Some(task) = self.db_writer_task.take() {
-            if let Err(err) = task.join() {
-                warn!(target: "exex::research", error = ?err, "Database writer task join failed during shutdown");
-            }
+        if let Some(task) = self.db_writer_task.take() &&
+            let Err(err) = task.join()
+        {
+            warn!(target: "exex::research", error = ?err, "Database writer task join failed during shutdown");
         }
 
         Ok(())
@@ -876,7 +878,7 @@ where
         match &notification {
             ExExNotification::ChainCommitted { new } => {
                 let mut highest_finished = None;
-                for (_block_number, block) in new.blocks() {
+                for block in new.blocks().values() {
                     let block_number = block.number();
 
                     if block_number < self.start_block {
@@ -935,7 +937,7 @@ where
                 );
 
                 let mut highest_finished = None;
-                for (_block_number, block) in new.blocks() {
+                for block in new.blocks().values() {
                     let block_number = block.number();
                     if block_number < self.start_block {
                         highest_finished = Some(block.num_hash());
@@ -1463,33 +1465,32 @@ where
                             );
                         }
                         sched_tx_env.set_gas_limit(adjusted);
-                    } else if schedule.modifies_intrinsic() && !schedule.uses_native_intrinsic_gas()
+                    } else if schedule.modifies_intrinsic() &&
+                        !schedule.uses_native_intrinsic_gas() &&
+                        let Some(ref ctx) = tx_context &&
+                        let Some(schedule_intrinsic) = schedule.intrinsic_gas(ctx)
                     {
-                        if let Some(ref ctx) = tx_context {
-                            if let Some(schedule_intrinsic) = schedule.intrinsic_gas(ctx) {
-                                let intrinsic_delta = i128::from(schedule_intrinsic) -
-                                    i128::from(baseline_intrinsic_gas);
-                                let replay_limit = i128::from(schedule_execution_gas_limit);
-                                let raw_adjusted = replay_limit - intrinsic_delta;
-                                let adjusted = raw_adjusted.clamp(0, replay_limit) as u64;
-                                if raw_adjusted < 0 || raw_adjusted > replay_limit {
-                                    debug!(
-                                        target: "exex::research",
-                                        block = block_number,
-                                        tx_idx,
-                                        schedule = schedule.name(),
-                                        tier,
-                                        %intrinsic_delta,
-                                        %gas_limit,
-                                        %schedule_execution_gas_limit,
-                                        %adjusted,
-                                        "Gas limit clamped for 'Both' schedule — execution \
-                                         budget may be conservative"
-                                    );
-                                }
-                                sched_tx_env.set_gas_limit(adjusted);
-                            }
+                        let intrinsic_delta =
+                            i128::from(schedule_intrinsic) - i128::from(baseline_intrinsic_gas);
+                        let replay_limit = i128::from(schedule_execution_gas_limit);
+                        let raw_adjusted = replay_limit - intrinsic_delta;
+                        let adjusted = raw_adjusted.clamp(0, replay_limit) as u64;
+                        if raw_adjusted < 0 || raw_adjusted > replay_limit {
+                            debug!(
+                                target: "exex::research",
+                                block = block_number,
+                                tx_idx,
+                                schedule = schedule.name(),
+                                tier,
+                                %intrinsic_delta,
+                                %gas_limit,
+                                %schedule_execution_gas_limit,
+                                %adjusted,
+                                "Gas limit clamped for 'Both' schedule — execution \
+                                 budget may be conservative"
+                            );
                         }
+                        sched_tx_env.set_gas_limit(adjusted);
                     }
 
                     // Stash the first tier's env (the mainnet-equivalent run)
@@ -1743,6 +1744,11 @@ where
                 // control flow changed. Non-native schedules (e.g. 7904) apply
                 // gas via the inspector, so they already record a divergence and
                 // never reach here.
+                // Kept nested (not a let-chain): the `tier1_envs.take()`
+                // env-availability gate is semantically distinct from the
+                // boolean preconditions, and folding all six into one chain
+                // over this ~38-line step-trace-diff body hurts readability.
+                #[allow(clippy::collapsible_if)]
                 if chosen.divergence_location_structured.is_none() &&
                     chosen.replay_halt_oog != Some(true) &&
                     native_env_configured &&
@@ -1778,14 +1784,13 @@ where
                         let sched_ok = sched_evm.transact(diff_tx_env).is_ok();
                         drop(sched_evm);
 
-                        if let Some(Some(base_steps)) = baseline_step_trace.as_ref() {
-                            if sched_ok && !sched_insp.truncated() {
-                                if let Some(loc) = first_divergence(base_steps, sched_insp.steps())
-                                {
-                                    chosen.divergence_location = Some(format!("{loc:?}"));
-                                    chosen.divergence_location_structured = Some(loc);
-                                }
-                            }
+                        if let Some(Some(base_steps)) = baseline_step_trace.as_ref() &&
+                            sched_ok &&
+                            !sched_insp.truncated() &&
+                            let Some(loc) = first_divergence(base_steps, sched_insp.steps())
+                        {
+                            chosen.divergence_location = Some(format!("{loc:?}"));
+                            chosen.divergence_location_structured = Some(loc);
                         }
                     }
                 }
@@ -2331,7 +2336,7 @@ where
         let block_number = output.coverage.block_number;
         let schedule_name = output.coverage.schedule_name.clone();
         let drill_ins = output.drill_ins.len();
-        if let Err(e) = tx.send(DbCommand::BlockProcessed(output)) {
+        if let Err(e) = tx.send(DbCommand::BlockProcessed(Box::new(output))) {
             warn!(
                 target: "exex::research",
                 block = block_number,
