@@ -44,8 +44,8 @@ pub struct ResearchArgs {
     #[arg(long = "research.multiplier", value_name = "NAME=MULT", help_heading = "Research")]
     pub multiplier_schedules: Vec<String>,
 
-    /// Path to the SQLite divergence database file. Opened in WAL mode so
-    /// the consumer dashboard (DuckDB sqlite_scanner) can read concurrently.
+    /// Path to the `SQLite` divergence database file. Opened in WAL mode so
+    /// the consumer dashboard (`DuckDB` `sqlite_scanner`) can read concurrently.
     #[arg(
         long = "research.db-path",
         default_value = "./divergences.sqlite",
@@ -164,7 +164,7 @@ pub struct ResearchArgs {
     pub contract_labels_interval_secs: u64,
 
     /// Interval (seconds) for the periodic function-signature backfill
-    /// that fetches 4-byte selector → signature mappings from OpenChain.
+    /// that fetches 4-byte selector → signature mappings from `OpenChain`.
     /// Set `0` to disable.
     #[arg(
         long = "research.function-signatures-interval-secs",
@@ -191,7 +191,7 @@ impl Default for ResearchArgs {
             eip8038: false,
             csv_schedules: Vec::new(),
             multiplier_schedules: Vec::new(),
-            db_path: PathBuf::from("./divergence.db"),
+            db_path: PathBuf::from("./divergences.sqlite"),
             start_block: 0,
             max_divergences_per_block: None,
             gas_limit_multipliers: vec![1, 2, 4, 8],
@@ -278,7 +278,7 @@ impl ResearchArgs {
         args.build_registry()
     }
 
-    /// Opens the divergence database (DuckDB).
+    /// Opens the divergence database (`DuckDB`).
     pub fn open_database(
         &self,
     ) -> Result<reth_research::database::DivergenceDatabase, reth_research::DatabaseError> {
